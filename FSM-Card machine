@@ -1,0 +1,1122 @@
+library IEEE;
+use IEEE.STD_LOGIC_1164.ALL;
+
+entity Test4Principal is
+ Port(
+        CLK  : in  STD_LOGIC;
+        STEP : out STD_LOGIC;
+		  RX   : in  STD_LOGIC;----para recibir la informacion de 
+        SEG : out  STD_LOGIC_VECTOR (7 DOWNTO 0);
+        AN : out  STD_LOGIC_VECTOR (7 DOWNTO 0);
+		  SW : in STD_LOGIC_VECTOR (7 downto 0);
+		  LEDR : out STD_LOGIC_VECTOR (7 downto 0);
+		  LEDV : out STD_LOGIC_VECTOR (7 downto 0);
+		  ST : in STD_LOGIC;
+		  MOTOR : out STD_LOGIC;
+		  DIR  : out STD_LOGIC
+    );
+end Test4Principal;
+
+architecture Behavioral of Test4Principal is
+--===========SIGNALS Y CONSTANST VAN AQUI================
+--============-para el NEMA
+constant TOTAL_STEPS  : integer := 200;--200 pasos igual a 360 grados
+constant CLK_FREQ     : integer := 50_000_000;--amiba
+constant DIVISOR      : integer := CLK_FREQ / 200;--A mayor DIVISOR menor velocidad Actual 250 000--a menor numero abajo menos velocidad
+signal contador_clk   : integer range 0 to DIVISOR := 0;
+signal contador_pasos : integer range 0 to TOTAL_STEPS := 0;
+signal PasosHorario   : integer range 0 to TOTAL_STEPS := 0;
+signal Paso_actual    : integer range 0 to TOTAL_STEPS := 0;--------Prueba para regresarlo de donde este 
+signal step_int       : STD_LOGIC := '0';---Estado actual a transmitir
+--===================Para COMUNICACION RX====================
+constant BAUD_COUNT : integer := 5208; 
+constant BAUD_MEDIO : integer := 2604;----mitad del periodo para muestreo
+signal RX_sync : std_logic_vector(1 downto 0) := "11";  -- Sincronización RX
+signal BaudRate_Rx : integer := 0;
+signal Nbit_Rx : integer range 0 to 7 := 0;
+signal Dato_Rx : std_logic_vector(7 downto 0) := "00000000";------IMPORTANTE para comunivcar con NEXTION
+signal info : std_logic_vector(3 downto 0);-----para el dato recibido
+-------------Maquina estados para la comunicacion
+type estado_rx_type is (IDLE_RX, START_BIT, DATA_BITS, STOP_BIT);
+signal estado_rx : estado_rx_type := IDLE_RX;
+--==================PARA LOS DISPLAY=========================
+signal Disp : integer range 0 to 7 := 0;---USAREMOS LOS 8 DISPLAYS
+signal DFreq : integer range 0 to 50000 := 0;
+--======================COMUNICAR SWITCHES CON DISPLAY===========
+signal Conteo_unos : integer range 0 to 8 := 0;
+signal Players : integer range 1 to 8 := 1;---1 a 8 jugadores
+signal AuxPlayers : integer range 0 to 8 := 0;---cilcio reperit
+signal Players_vec : std_logic_vector(7 downto 0) := "00000000";------numero de players en vec
+signal Players_latched : std_logic := '0';
+signal Grados_latched : std_logic := '0';
+signal Cartas_latched : std_logic := '0';
+signal Cards : integer range 1 to 10 := 1;---1 a 10 cartas
+signal AuxCartas : integer range 0 to 10 := 0;---1 a 10 cartas
+--signal CartasRepartidas : integer :=0;-----ciclo repretir
+signal CartaMaxima : integer range 1 to 10 := 1;
+signal Grados : integer range 1 to 3 := 1;---0 es 90 grados, 1 es 180 grados, 2 es 360 grados
+signal CentenasG : std_logic_vector(7 downto 0) := "00000000";
+signal DecenasG : std_logic_vector(7 downto 0) := "00000000";
+signal UnidadesG : std_logic_vector(7 downto 0) := "00000000";
+constant Uno : STD_LOGIC_VECTOR(7 downto 0)    := "11111001";---1
+constant Dos : STD_LOGIC_VECTOR(7 downto 0)    := "10100100";---2
+constant Tres : STD_LOGIC_VECTOR(7 downto 0)   := "10110000";---3
+constant Cuatro : STD_LOGIC_VECTOR(7 downto 0) := "10011001";---4
+constant Cinco : STD_LOGIC_VECTOR(7 downto 0)  := "10010010";---5
+constant Seis : STD_LOGIC_VECTOR(7 downto 0)   := "10000010";---6
+constant Siete : STD_LOGIC_VECTOR(7 downto 0)  := "11111000";---7
+constant Ocho : STD_LOGIC_VECTOR(7 downto 0)   := "10000000";---8
+constant Nueve : STD_LOGIC_VECTOR(7 downto 0)  := "10011000";---9
+constant Cero : STD_LOGIC_VECTOR(7 downto 0)   := "11000000";---0
+--================FSM PRINCIPOLA=============
+type estado_main_type is (IDLE_MAIN,START_MAIN,PLAYERS_MAIN,GRADOS_MAIN,CARTAS_MAIN,SUBIDA1,BAJADA1,SUBIDA2,BAJADA2,MOTORREDUCTOR_ON,MOTORREDUCTOR_OFF,PLAYERS_NEXTION,GRADOS_NEXTION,CARTAS_NEXTION,HOLD_MAIN);
+signal estado_main : estado_main_type := IDLE_MAIN;
+-----========ANTIRREBOTE BOTONES=========
+signal ST_an,EdoST : STD_LOGIC := '0';
+signal STCnt  : integer := 0;
+signal STOk_an : STD_LOGIC := '0';
+signal STOk   : STD_LOGIC := '0';
+-----===============TIMERS ==========
+constant Timer2 : integer := 100000000;  -- 3 segundos
+signal Contador : integer := 0;
+----=============mesa real con nema=========
+signal PasosMesa : integer range 1 to 200 := 1;--No de pasos  que se movera el nema segun grados elegidos y players
+------------------------========MOTORREDUCTOR=========================
+-- Constantes para temporización (para 50 MHz clock)
+constant MiliSec    : integer := 100;
+constant TimeEncendido  : integer := CLK_FREQ * MiliSec / 1000;    -- 85 ms = 4,250,000 cicloS
+-- Máquina de estados
+type estado_t is (ENCENDIDO, APAGADO);
+signal estado : estado_t := ENCENDIDO;
+ 
+signal ContadorMotorreductor : integer range 0 to Timer2 := 0;
+						
+begin------BEGIN PROGRAMA
+------===============PARA COSAS FUERA DEL PROCESS PRINCIPAL
+LEDR <= SW; LEDV <= SW; STEP <= step_int;----Asignar los switches encendidos a leds
+-----=====================ANTERREBOTES================
+process(Clk)
+begin
+    if rising_edge(Clk) then
+        ST_an <= ST;
+        if (ST_an = '0' and ST = '1') or 
+           (ST_an = '1' and ST = '0') or 
+           (STCnt= 50000) then
+            STCnt <= 0;
+        else
+            STCnt <= STCnt + 1;
+        end if;
+        if STCnt = 49999 then
+            STOk <= ST;
+        end if;
+        STOk_an <= STOk;
+		  ----FALCNCO DE SUBIDA DE LOS BOTONES, 
+		  EdoST <= STOk and not STOk_an;
+    end if;
+end process;
+
+-- Sincronización de RX (evitar metaestabilidad)
+process(Clk)
+begin
+   if rising_edge(Clk) then
+      RX_sync <= RX_sync(0) & RX;
+   end if;
+end process;
+
+PROCESS (CLK,SW,Conteo_unos)----===PROCESS PRINCIAPL==========
+---====varialbes necesarias======
+variable cont : integer range 0 to 8;------------
+		  ----------==========No funciona con signla por tiempos de actualizacion
+		  
+BEGIN--=====PROCES PROINCIAPL
+	
+	if rising_edge(CLK) then ----IF principal del rising edge CLK
+	
+	-----==============FMS COMUNICACION==========
+		case estado_rx is--case de la comunicacion
+			when IDLE_RX =>
+				BaudRate_Rx <= 0; Nbit_Rx <= 0;
+				-- Detectar start bit (flanco de bajada: 1→0)
+            if RX_sync(1) = '0' then
+               estado_rx <= START_BIT; BaudRate_Rx <= 0;
+            end if;
+			when START_BIT => 
+				if BaudRate_Rx < BAUD_MEDIO then
+					BaudRate_Rx <= BaudRate_Rx + 1;
+				else 
+				-----------veriricar que sigue en bajo (bit valido)
+					if RX_sync(1) = '0' then
+                  estado_rx <= DATA_BITS; BaudRate_Rx <= 0; Nbit_Rx <= 0;
+               else
+                   -- Falsa alarma, volver a IDLE
+                   estado_rx <= IDLE_RX;
+               end if;
+				end if;
+				
+			when DATA_BITS =>
+				if BaudRate_Rx < BAUD_COUNT then
+					BaudRate_Rx <= BaudRate_Rx + 1;
+				else
+				--=================Aqui recibimos el Dato_Rx========================
+					Dato_Rx(Nbit_Rx) <= RX_sync(1); BaudRate_Rx <= 0;	
+					if Nbit_Rx = 7 then
+               -- Todos los bits recibidos
+                  estado_rx <= STOP_BIT;
+               else
+                  Nbit_Rx <= Nbit_Rx + 1;
+               end if;
+				end if;
+			when STOP_BIT =>
+				if BaudRate_Rx < BAUD_COUNT then
+					BaudRate_Rx <= BaudRate_Rx + 1;
+				else
+					estado_rx <= IDLE_RX;
+					BaudRate_Rx <= 0;
+				end if;
+		end case;-- case de la comnicaionc
+		
+	-------===========TEST 1 FSM MAIN ============
+	case estado_main is
+		when IDLE_MAIN =>
+			Players         <= 1;
+			Cards           <= 1;
+			AN              <="00000000";
+			Players_latched <='0';
+			Grados_latched  <='0';	
+			SEG             <="10111111";---GUION
+			Contador        <= 0;----Resetear los dos segundos
+			PasosMesa       <= 1;----resetar los grados mesa
+			contador_clk    <= 0; ----0 a 250 000 (DIVISOR)
+         contador_pasos  <= 0;-----0 a 200
+         step_int        <= '0';---Estado actual es decir no mover
+
+			estado_main <= START_MAIN;
+			
+		when START_MAIN =>
+			-- Mostrar X en todos los displays
+			AN <= "00000000";SEG <= "00111111";---LOS ULTIMOS 2 , GUIN CON PUNTO
+			-------=====CAMBIO A PLAYERS MAIN
+			if EdoST = '1' then
+				estado_main <= PLAYERS_MAIN;
+				Players_latched <= '0';  -- Resetear para nuevo ciclo
+			elsif Dato_Rx = "00000001" then ---pasar al siguiente edo NExtion
+				estado_main <= PLAYERS_NEXTION; ---players de nextion
+			end if;
+			
+		when PLAYERS_MAIN =>  --STOk_an <= STOk;
+			-- Inicialmente, mostrar X en todos los displays
+			if Players_latched = '0' then
+				AN <= "00000000"; SEG <= "10001001";---EQUIS
+			end if;
+			
+			-- Detectar click para leer switches
+			if EdoST = '1' and Players_latched = '0' then
+				-- Contar switches activos
+				cont := 0;
+				for i in 0 to 7 loop
+					if SW(i) = '1' then
+						cont := cont + 1;
+					end if;
+				end loop;
+			-- Almacenar el número de jugadores====
+			Players <= cont; Players_latched <= '1';  -- Indicar que ya se leyó
+				case cont is   -- Convertir número a patrón del display
+					when 1 => Players_vec <= "11111001";  -- 1
+					when 2 => Players_vec <= "10100100";  -- 2
+					when 3 => Players_vec <= "10110000";  -- 3
+					when 4 => Players_vec <= "10011001";  -- 4
+					when 5 => Players_vec <= "10010010";  -- 5
+					when 6 => Players_vec <= "10000010";  -- 6
+					when 7 => Players_vec <= "11111000";  -- 7
+					when 8 => Players_vec <= "10000000";  -- 8
+					when others =>
+						estado_main <= IDLE_MAIN;-----NO permitir 0 jugadores----
+				end case;
+			end if;
+			-- Multiplexado de displays (siempre activo, pero con contenido diferente)
+			if DFreq = 49999 then
+				DFreq <= 0;
+				if Disp = 7 then
+					Disp <= 0;
+				else
+					Disp <= Disp + 1;
+				end if;
+			else
+				DFreq <= DFreq + 1;
+			end if;
+			-- Activar display correspondiente
+			case Disp is
+				when 0 => AN <= "11111110";
+				when 1 => AN <= "11111101";
+				when 2 => AN <= "11111011";
+				when 3 => AN <= "11110111";  -- Display para número de jugadores
+				when 4 => AN <= "11101111";
+				when 5 => AN <= "11011111";
+				when 6 => AN <= "10111111";
+				when others => AN <= "01111111";
+			end case;
+			-- Mostrar contenido según si ya se hizo click o no
+			if Players_latched = '1' then---incica que se dio el click para leer
+				-- Después del click: mostrar número en display 3, X en los otros
+				if Disp = 3 then
+					SEG <= Players_vec;
+				else
+					SEG <= "10001001";  -- X en otros displays
+				end if;
+			else
+				-- Antes del click: mostrar X en todos los displays
+				SEG <= "10001001";  -- X en todos
+			end if;
+		-----=====SIGUEINTE ESTADO ========
+			 if EdoST = '1' and Players_latched = '1' then
+			     estado_main <= GRADOS_MAIN;-----ahora mismo estoy probando con IDLE
+				  Players_latched <= '0';---LO regereso a 0
+				  Grados_latched <= '0';-- estado sigueinte dedseado
+			 end if;
+			 
+		when PLAYERS_NEXTION =>	
+			case Dato_Rx is
+				when "00000010" => Players <= 1; estado_main <= GRADOS_NEXTION;
+				when "00000011" => Players <= 2; estado_main <= GRADOS_NEXTION;
+				when "00000100" => Players <= 3; estado_main <= GRADOS_NEXTION;
+				when "00000101" => Players <= 4; estado_main <= GRADOS_NEXTION;
+				when "00000110" => Players <= 5; estado_main <= GRADOS_NEXTION;
+				when "00000111" => Players <= 6; estado_main <= GRADOS_NEXTION;
+				when "00001000" => Players <= 7; estado_main <= GRADOS_NEXTION;
+				when "00001001" => Players <= 8; estado_main <= GRADOS_NEXTION;
+				when others =>  estado_main <= PLAYERS_NEXTION;
+			end case;
+			
+		when GRADOS_MAIN =>
+			-- Multiplexado de displays (siempre activo, pero con contenido diferente)
+				if DFreq = 49999 then
+					DFreq <= 0;
+					if Disp = 7 then
+						Disp <= 0;
+					else
+						Disp <= Disp + 1;
+					end if;
+				else
+					DFreq <= DFreq + 1;
+				end if;
+			
+			-- Activar display correspondiente
+			case Disp is
+				when 0 => AN <= "11111110";	----disp unidqdes grados
+				when 1 => AN <= "11111101";	---disp para decensas gradso
+				when 2 => AN <= "11111011";  ---Disp para centenas de grados
+				when 3 => AN <= "11110111";  -- Display para número de jugadores
+				when 4 => AN <= "11101111";
+				when 5 => AN <= "11011111";
+				when 6 => AN <= "10111111";
+				when others => AN <= "01111111";
+			end case;
+			---------
+		if Grados_latched = '0' then---se ejecuta automaticamente, declaramos Grados_lat =0 en el edo pasado
+					-- Mostrar X en displays 0-2, número en display 3
+					if Disp = 3 then
+						SEG <= Players_vec;  -- Número de jugadores
+					else
+						SEG <= "10001001";  -- X en otros displays
+					end if;
+		end if;
+			-- Detectar click para leer switches para numero de grados
+			if EdoST = '1' and Grados_latched = '0' then
+				-- Contar switches activos
+				cont := 0;
+				for i in 0 to 7 loop
+					if SW(i) = '1' then
+						cont := cont + 1;
+					end if;
+				end loop;
+				-- Almacenar el número de jugadores====
+				if cont=4 or cont=5 or cont=6 or cont=7 or cont=8 then
+					Grados <= 3;
+					Grados_latched <= '1';
+				else
+					Grados <= cont;----ya estan asignados 1 o 2 o 3 fuera de eso se toma 3
+					Grados_latched <= '1';  -- Indicar que ya se leyó
+				end if;
+			end if;
+			
+			-- Mostrar contenido según si ya se hizo click o no
+			if Grados_latched = '1' then ------indica que se dio click para leer
+				case Players is
+					when 1 => ----1P
+						case Grados is
+							when 1 => ---1P 1G
+								PasosMesa <= 1;-----Pasos que dara el nema para cada jugador
+								UnidadesG <= Cero ;DecenasG <= Nueve;CentenasG <= Cero;
+								case Disp is
+									when 0 => SEG <= UnidadesG;--0
+									when 1 => SEG <= DecenasG;--9
+									when 2 => SEG <= CentenasG;--0
+									when 3 => SEG <= Players_vec;  -- Display para número de jugadores
+									when others => SEG <= "10001001";
+								end case;
+								-----=====SIGUEINTE ESTADO ========
+								 if EdoST = '1' and Grados_latched = '1' then
+									  estado_main <= CARTAS_MAIN;-----ahora mismo estoy probando con IDLE
+									  Grados_latched <= '0';-- lo regreso a 0
+									  Cartas_latched <= '0'; ---Estrado sigueinte deseado
+								 end if;
+							
+							when 2 => --1P 2G
+								PasosMesa <= 1;----Pasos que dara el nema para cada jugador
+								UnidadesG <= Cero ;DecenasG <= Ocho;CentenasG <= Uno;
+								case Disp is
+									when 0 => SEG <= UnidadesG;--0
+									when 1 => SEG <= DecenasG;--8
+									when 2 => SEG <= CentenasG;--1
+									when 3 => SEG <= Players_vec;  -- Display para número de jugadores
+									when others => SEG <= "10001001";
+								end case;
+								-----=====SIGUEINTE ESTADO ========
+								 if EdoST = '1' and Grados_latched = '1' then
+									  estado_main <= CARTAS_MAIN;-----ahora mismo estoy probando con IDLE
+									  Grados_latched <= '0';-- lo regreso a 0
+									  Cartas_latched <= '0'; ---Estrado sigueinte deseado
+								 end if;
+							
+							when 3 => --1P 3G
+								PasosMesa <= 1;----Pasos que dara el nema para cada jugador
+								UnidadesG <= Cero ;DecenasG <= Seis;CentenasG <= Tres;
+								case Disp is
+									when 0 => SEG <= UnidadesG;--0
+									when 1 => SEG <= DecenasG;--6
+									when 2 => SEG <= CentenasG;--3
+									when 3 => SEG <= Players_vec;  -- Display para número de jugadores
+									when others => SEG <= "10001001";
+								end case;
+								-----=====SIGUEINTE ESTADO ========
+								 if EdoST = '1' and Grados_latched = '1' then
+									  estado_main <= CARTAS_MAIN;-----ahora mismo estoy probando con IDLE
+									  Grados_latched <= '0';-- lo regreso a 0
+									  Cartas_latched <= '0'; ---Estrado sigueinte deseado
+								 end if;
+						end case;
+						
+					when 2 => --2P
+						case Grados is
+							when 1 => ---2P 1G
+								PasosMesa <= 24;-----APROX 43 GRADOS
+								UnidadesG <= Cero ;DecenasG <= Nueve;CentenasG <= Cero;
+								case Disp is
+									when 0 => SEG <= UnidadesG;--0
+									when 1 => SEG <= DecenasG;--9
+									when 2 => SEG <= CentenasG;--0
+									when 3 => SEG <= Players_vec;  -- Display para número de jugadores
+									when others => SEG <= "10001001";
+								end case;
+								-----=====SIGUEINTE ESTADO ========
+								 if EdoST = '1' and Grados_latched = '1' then
+									  estado_main <= CARTAS_MAIN;-----ahora mismo estoy probando con IDLE
+									  Grados_latched <= '0';-- lo regreso a 0
+									  Cartas_latched <= '0'; ---Estrado sigueinte deseado
+								 end if;
+								
+							when 2 => --2P 2G
+								PasosMesa <= 49;---- APRIX 88 GRADOS
+								UnidadesG <= Cero ;DecenasG <= Ocho;CentenasG <= Uno;
+								case Disp is
+									when 0 => SEG <= UnidadesG;--0
+									when 1 => SEG <= DecenasG;--8
+									when 2 => SEG <= CentenasG;--1
+									when 3 => SEG <= Players_vec;  -- Display para número de jugadores
+									when others => SEG <= "10001001";
+								end case;
+								-----=====SIGUEINTE ESTADO ========
+								 if EdoST = '1' and Grados_latched = '1' then
+									  estado_main <= CARTAS_MAIN;-----ahora mismo estoy probando con IDLE
+									  Grados_latched <= '0';-- lo regreso a 0
+									  Cartas_latched <= '0'; ---Estrado sigueinte deseado
+								 end if;
+							
+
+							when 3 => --2P 3G
+								PasosMesa <= 99;---- APRIX 178 GRADOS
+								UnidadesG <= Cero ;DecenasG <= Seis;CentenasG <= Tres;
+								case Disp is
+									when 0 => SEG <= UnidadesG;--0
+									when 1 => SEG <= DecenasG;--6
+									when 2 => SEG <= CentenasG;--3
+									when 3 => SEG <= Players_vec;  -- Display para número de jugadores
+									when others => SEG <= "10001001";
+								end case;
+								-----=====SIGUEINTE ESTADO ========
+								 if EdoST = '1' and Grados_latched = '1' then
+									  estado_main <= CARTAS_MAIN;-----ahora mismo estoy probando con IDLE
+									  Grados_latched <= '0';-- lo regreso a 0
+									  Cartas_latched <= '0'; ---Estrado sigueinte deseado
+								 end if;
+							
+								
+						end case;
+						
+					when 3 => --3P
+						case Grados is							
+							when 1 => ---3P 1G
+								PasosMesa <= 15;---- APRIX 27 GRADOS
+								UnidadesG <= Cero ;DecenasG <= Nueve;CentenasG <= Cero;
+								case Disp is
+									when 0 => SEG <= UnidadesG;--0
+									when 1 => SEG <= DecenasG;--9
+									when 2 => SEG <= CentenasG;--0
+									when 3 => SEG <= Players_vec;  -- Display para número de jugadores
+									when others => SEG <= "10001001";
+								end case;
+								-----=====SIGUEINTE ESTADO ========
+								 if EdoST = '1' and Grados_latched = '1' then
+									  estado_main <= CARTAS_MAIN;-----ahora mismo estoy probando con IDLE
+									  Grados_latched <= '0';-- lo regreso a 0
+									  Cartas_latched <= '0'; ---Estrado sigueinte deseado
+								 end if;
+							
+								
+							when 2 => --3P 2G
+								PasosMesa <= 32;---- APRIX 57 GRADOS
+								UnidadesG <= Cero ;DecenasG <= Ocho;CentenasG <= Uno;
+								case Disp is
+									when 0 => SEG <= UnidadesG;--0
+									when 1 => SEG <= DecenasG;--8
+									when 2 => SEG <= CentenasG;--1
+									when 3 => SEG <= Players_vec;  -- Display para número de jugadores
+									when others => SEG <= "10001001";
+								end case;
+								-----=====SIGUEINTE ESTADO ========
+								 if EdoST = '1' and Grados_latched = '1' then
+									  estado_main <= CARTAS_MAIN;-----ahora mismo estoy probando con IDLE
+									  Grados_latched <= '0';-- lo regreso a 0
+									  Cartas_latched <= '0'; ---Estrado sigueinte deseado
+								 end if;
+							
+
+							when 3 => --3P 3G
+								PasosMesa <= 65;---- APRIX 117 GRADOS
+								UnidadesG <= Cero ;DecenasG <= Seis;CentenasG <= Tres;
+								case Disp is
+									when 0 => SEG <= UnidadesG;--0
+									when 1 => SEG <= DecenasG;--6
+									when 2 => SEG <= CentenasG;--3
+									when 3 => SEG <= Players_vec;  -- Display para número de jugadores
+									when others => SEG <= "10001001";
+								end case;
+								-----=====SIGUEINTE ESTADO ========
+								 if EdoST = '1' and Grados_latched = '1' then
+									  estado_main <= CARTAS_MAIN;-----ahora mismo estoy probando con IDLE
+									  Grados_latched <= '0';-- lo regreso a 0
+									  Cartas_latched <= '0'; ---Estrado sigueinte deseado
+								 end if;
+							
+								
+						end case;
+						
+					when 4 => --4P
+						case Grados is
+							when 1 => ---4P 1G
+								PasosMesa <= 12;---- APRIX 22.5 GRADOS
+								UnidadesG <= Cero ;DecenasG <= Nueve;CentenasG <= Cero;
+								case Disp is
+									when 0 => SEG <= UnidadesG;--0
+									when 1 => SEG <= DecenasG;--9
+									when 2 => SEG <= CentenasG;--0
+									when 3 => SEG <= Players_vec;  -- Display para número de jugadores
+									when others => SEG <= "10001001";
+								end case;
+								-----=====SIGUEINTE ESTADO ========
+								 if EdoST = '1' and Grados_latched = '1' then
+									  estado_main <= CARTAS_MAIN;-----ahora mismo estoy probando con IDLE
+									  Grados_latched <= '0';-- lo regreso a 0
+									  Cartas_latched <= '0'; ---Estrado sigueinte deseado
+								 end if;
+							
+								
+							when 2 => --4P 2G
+								PasosMesa <= 24;---- APRIX 43 GRADOS
+								UnidadesG <= Cero ;DecenasG <= Ocho;CentenasG <= Uno;
+								case Disp is
+									when 0 => SEG <= UnidadesG;--0
+									when 1 => SEG <= DecenasG;--8
+									when 2 => SEG <= CentenasG;--1
+									when 3 => SEG <= Players_vec;  -- Display para número de jugadores
+									when others => SEG <= "10001001";
+								end case;
+								-----=====SIGUEINTE ESTADO ========
+								 if EdoST = '1' and Grados_latched = '1' then
+									  estado_main <= CARTAS_MAIN;-----ahora mismo estoy probando con IDLE
+									  Grados_latched <= '0';-- lo regreso a 0
+									  Cartas_latched <= '0'; ---Estrado sigueinte deseado
+								 end if;
+							
+
+							when 3 => --4P 3G
+								PasosMesa <= 49;---- APRIX 88 GRADOS
+								UnidadesG <= Cero ;DecenasG <= Seis;CentenasG <= Tres;
+								case Disp is
+									when 0 => SEG <= UnidadesG;--0
+									when 1 => SEG <= DecenasG;--6
+									when 2 => SEG <= CentenasG;--3
+									when 3 => SEG <= Players_vec;  -- Display para número de jugadores
+									when others => SEG <= "10001001";
+								end case;
+								-----=====SIGUEINTE ESTADO ========
+								 if EdoST = '1' and Grados_latched = '1' then
+									  estado_main <= CARTAS_MAIN;-----ahora mismo estoy probando con IDLE
+									  Grados_latched <= '0';-- lo regreso a 0
+									  Cartas_latched <= '0'; ---Estrado sigueinte deseado
+								 end if;
+						end case;
+						
+					when 5 => --5P
+						case Grados is
+							when 1 => --5P 2G
+								PasosMesa <= 19;---- APRIX 34 GRADOS
+								UnidadesG <= Cero ;DecenasG <= Ocho;CentenasG <= Uno;
+								case Disp is
+									when 0 => SEG <= UnidadesG;--0
+									when 1 => SEG <= DecenasG;--8
+									when 2 => SEG <= CentenasG;--1
+									when 3 => SEG <= Players_vec;  -- Display para número de jugadores
+									when others => SEG <= "10001001";
+								end case;
+								-----=====SIGUEINTE ESTADO ========
+								 if EdoST = '1' and Grados_latched = '1' then
+									  estado_main <= CARTAS_MAIN;-----ahora mismo estoy probando con IDLE
+									  Grados_latched <= '0';-- lo regreso a 0
+									  Cartas_latched <= '0'; ---Estrado sigueinte deseado
+								 end if;
+							
+							when 2 => --5P 2G
+								PasosMesa <= 19;---- APRIX 34 GRADOS
+								UnidadesG <= Cero ;DecenasG <= Ocho;CentenasG <= Uno;
+								case Disp is
+									when 0 => SEG <= UnidadesG;--0
+									when 1 => SEG <= DecenasG;--8
+									when 2 => SEG <= CentenasG;--1
+									when 3 => SEG <= Players_vec;  -- Display para número de jugadores
+									when others => SEG <= "10001001";
+								end case;
+								-----=====SIGUEINTE ESTADO ========
+								 if EdoST = '1' and Grados_latched = '1' then
+									  estado_main <= CARTAS_MAIN;-----ahora mismo estoy probando con IDLE
+									  Grados_latched <= '0';-- lo regreso a 0
+									  Cartas_latched <= '0'; ---Estrado sigueinte deseado
+								 end if;
+							
+							when 3 => --5P 3G
+								PasosMesa <= 39;---- APRIX 70 GRADOS
+								UnidadesG <= Cero ;DecenasG <= Seis;CentenasG <= Tres;
+								case Disp is
+									when 0 => SEG <= UnidadesG;--0
+									when 1 => SEG <= DecenasG;--6
+									when 2 => SEG <= CentenasG;--3
+									when 3 => SEG <= Players_vec;  -- Display para número de jugadores
+									when others => SEG <= "10001001";
+								end case;
+								-----=====SIGUEINTE ESTADO ========
+								 if EdoST = '1' and Grados_latched = '1' then
+									  estado_main <= CARTAS_MAIN;-----ahora mismo estoy probando con IDLE
+									  Grados_latched <= '0';-- lo regreso a 0
+									  Cartas_latched <= '0'; ---Estrado sigueinte deseado
+								 end if;	
+						end case;
+						
+					when 6 => --6P
+						case Grados is
+							when 1 => --6P 2G (180 GRADOS)
+								PasosMesa <= 15;---- APRIX 27 GRADOS
+								UnidadesG <= Cero ;DecenasG <= Ocho;CentenasG <= Uno;
+								case Disp is
+									when 0 => SEG <= UnidadesG;--0
+									when 1 => SEG <= DecenasG;--8
+									when 2 => SEG <= CentenasG;--1
+									when 3 => SEG <= Players_vec;  -- Display para número de jugadores
+									when others => SEG <= "10001001";
+								end case;
+								-----=====SIGUEINTE ESTADO ========
+								 if EdoST = '1' and Grados_latched = '1' then
+									  estado_main <= CARTAS_MAIN;-----ahora mismo estoy probando con IDLE
+									  Grados_latched <= '0';-- lo regreso a 0
+									  Cartas_latched <= '0'; ---Estrado sigueinte deseado
+								 end if;
+							
+							when 2 => --6P 2G (180 GRADASO)
+								PasosMesa <= 15;---- APRIX 27 GRADOS
+								UnidadesG <= Cero ;DecenasG <= Ocho;CentenasG <= Cero;
+								case Disp is
+									when 0 => SEG <= UnidadesG;--0
+									when 1 => SEG <= DecenasG;--8
+									when 2 => SEG <= CentenasG;--1
+									when 3 => SEG <= Players_vec;  -- Display para número de jugadores
+									when others => SEG <= "10001001";
+								end case;
+								-----=====SIGUEINTE ESTADO ========
+								 if EdoST = '1' and Grados_latched = '1' then
+									  estado_main <= CARTAS_MAIN;-----ahora mismo estoy probando con IDLE
+									  Grados_latched <= '0';-- lo regreso a 0
+									  Cartas_latched <= '0'; ---Estrado sigueinte deseado
+								 end if;
+
+							when 3 => --6P 3G  (360 GRADSO)
+								PasosMesa <= 32;---- APRIX 57 GRADOS
+								UnidadesG <= Cero ;DecenasG <= Seis;CentenasG <= Tres;
+								case Disp is
+									when 0 => SEG <= UnidadesG;--0
+									when 1 => SEG <= DecenasG;--6
+									when 2 => SEG <= CentenasG;--3
+									when 3 => SEG <= Players_vec;  -- Display para número de jugadores
+									when others => SEG <= "10001001";
+								end case;
+								-----=====SIGUEINTE ESTADO ========
+								 if EdoST = '1' and Grados_latched = '1' then
+									  estado_main <= CARTAS_MAIN;-----ahora mismo estoy probando con IDLE
+									  Grados_latched <= '0';-- lo regreso a 0
+									  Cartas_latched <= '0'; ---Estrado sigueinte deseado
+								 end if;
+						end case;
+						
+					when 7 => ---- 7 P (360 GRADSO)
+						Grados <= 3; 
+						PasosMesa <= 28;---- APRIX 50 GRADOS
+						UnidadesG <= Cero ;DecenasG <= Seis;CentenasG <= Tres;
+						case Disp is
+							when 0 => SEG <= UnidadesG;--0
+							when 1 => SEG <= DecenasG;--6
+							when 2 => SEG <= CentenasG;--3
+							when 3 => SEG <= Players_vec;  -- Display para número de jugadores
+							when others => SEG <= "10001001";
+						end case;
+						-----=====SIGUEINTE ESTADO ========
+						 if EdoST = '1' and Grados_latched = '1' then
+							  estado_main <= CARTAS_MAIN;-----ahora mismo estoy probando con IDLE
+							  Grados_latched <= '0';-- lo regreso a 0
+							  Cartas_latched <= '0'; ---Estrado sigueinte deseado
+						 end if;
+							
+					when 8 => ---8 P (360 GRDASO)
+						Grados <= 3;
+						PasosMesa <= 24;--- APROX 45 GRADOS
+						UnidadesG <= Cero ;DecenasG <= Seis;CentenasG <= Tres;
+						case Disp is
+							when 0 => SEG <= UnidadesG;
+							when 1 => SEG <= DecenasG;
+							when 2 => SEG <= CentenasG;
+							when 3 => SEG <= Players_vec;  -- Display para número de jugadores
+							when others => SEG <= "10001001";
+						end case;
+						-----=====SIGUEINTE ESTADO ========
+						 if EdoST = '1' and Grados_latched = '1' then
+							  estado_main <= CARTAS_MAIN;-----ahora mismo estoy probando con IDLE
+							  Grados_latched <= '0';-- lo regreso a 0
+							  Cartas_latched <= '0'; ---Estrado sigueinte deseado
+						 end if;	
+				end case;-------Fin case players
+			end if;
+			
+		when GRADOS_NEXTION => 
+			case Players is
+				when 1 => 
+					case Dato_Rx is
+						when "00010000" => PasosMesa <= 1; estado_main <= CARTAS_NEXTION;
+						when others =>  estado_main <= GRADOS_NEXTION;
+					end case;
+				when 2 =>
+					case Dato_Rx is
+						when "00010001" => PasosMesa <= 24; estado_main <= CARTAS_NEXTION;
+						when "00010010" => PasosMesa <= 49; estado_main <= CARTAS_NEXTION;
+						when "00010011" => PasosMesa <= 99; estado_main <= CARTAS_NEXTION;
+						when others => estado_main <= GRADOS_NEXTION;
+					end case;
+				
+				when 3 =>
+					case Dato_Rx is
+						when "00010100" => PasosMesa <= 15; estado_main <= CARTAS_NEXTION;
+						when "00010101" => PasosMesa <= 32; estado_main <= CARTAS_NEXTION;
+						when "00010110" => PasosMesa <= 65; estado_main <= CARTAS_NEXTION;
+						when others => estado_main <= GRADOS_NEXTION;
+					end case;
+				
+				when 4 =>
+					case Dato_Rx is
+						when "00010111" => PasosMesa <= 12; estado_main <= CARTAS_NEXTION;
+						when "00010001" => PasosMesa <= 24; estado_main <= CARTAS_NEXTION;
+						when "00010010" => PasosMesa <= 49; estado_main <= CARTAS_NEXTION;
+						when others => estado_main <= GRADOS_NEXTION;
+					end case;
+				
+				when 5 =>
+					case Dato_Rx is
+						when "00011000" => PasosMesa <= 19; estado_main <= CARTAS_NEXTION;
+						when "00011001" => PasosMesa <= 39; estado_main <= CARTAS_NEXTION;
+						when others => estado_main <= GRADOS_NEXTION;
+					end case;
+				
+				when 6 =>
+					case Dato_Rx is
+						when "00010100" => PasosMesa <= 15; estado_main <= CARTAS_NEXTION;
+						when "00010101" => PasosMesa <= 32; estado_main <= CARTAS_NEXTION;
+						when others => estado_main <= GRADOS_NEXTION;
+					end case;
+				
+				when 7 =>
+					case Dato_Rx is
+						when "00100000" => PasosMesa <= 28; estado_main <= CARTAS_NEXTION;
+						when others => estado_main <= GRADOS_NEXTION;
+					end case;
+				
+				when 8 =>
+					case Dato_Rx is
+						when "00010001" => PasosMesa <= 24; estado_main <= CARTAS_NEXTION;
+						when others => estado_main <= GRADOS_NEXTION;
+					end case;
+				
+				when others => PasosMesa <= 49;
+				
+			end case;
+			
+		when CARTAS_MAIN =>
+			-- Multiplexado de displays (siempre activo, pero con contenido diferente)
+				if DFreq = 49999 then
+					DFreq <= 0;
+					if Disp = 7 then
+						Disp <= 0;
+					else
+						Disp <= Disp + 1;
+					end if;
+				else
+					DFreq <= DFreq + 1;
+				end if;
+			
+			-- Activar display correspondiente
+			case Disp is
+				when 0 => AN <= "11111110";	----disp unidqdes grados
+				when 1 => AN <= "11111101";	---disp para decensas gradso
+				when 2 => AN <= "11111011";  ---Disp para centenas de grados
+				when 3 => AN <= "11110111";  -- Display para número de jugadores
+				when 4 => AN <= "11101111"; --nd
+				when 5 => AN <= "11011111"; --nd
+				when 6 => AN <= "10111111"; --decenas cartas
+				when others => AN <= "01111111";	---Unidades cartas
+			end case;
+			---------
+		if Cartas_latched = '0' then---se ejecuta automaticamente, declaramos Cartas_lat =0 en el edo pasado
+			case Disp is
+				when 0 => SEG <= UnidadesG;	----disp unidqdes grados
+				when 1 => SEG <= DecenasG;	---disp para decensas gradso
+				when 2 => SEG <= CentenasG;  ---Disp para centenas de grados
+				when 3 => SEG <= Players_vec;  -- Display para número de jugadores
+				when 4 => SEG <= "10001001"; --nd
+				when 5 => SEG <= "10001001"; --nd
+				when 6 => SEG <= "10001001"; --decenas cartas
+				when others => SEG <= "10001001";	---Unidades cartas
+			end case;
+		end if;
+
+			-- Detectar click para leer switches para numero de grados
+			if EdoST = '1' and Cartas_latched = '0' then
+				case SW is 
+					when "00001010" => Cards <=10; CartaMaxima <= Cards; Cartas_latched <='1'; --ya se leyo
+					when "00001001" => Cards <=9; CartaMaxima <= Cards; Cartas_latched <='1'; --ya se leyo
+					when "00001000" => Cards <=8; CartaMaxima <= Cards; Cartas_latched <='1'; --ya se leyo
+					when "00000111" => Cards <=7; CartaMaxima <= Cards; Cartas_latched <='1'; --ya se leyo
+					when "00000110" => Cards <=6; CartaMaxima <= Cards; Cartas_latched <='1'; --ya se leyo
+					when "00000101" => Cards <=5; CartaMaxima <= Cards; Cartas_latched <='1'; --ya se leyo
+					when "00000100" => Cards <=4; CartaMaxima <= Cards; Cartas_latched <='1'; --ya se leyo
+					when "00000011" => Cards <=3; CartaMaxima <= Cards; Cartas_latched <='1'; --ya se leyo
+					when "00000010" => Cards <=2; CartaMaxima <= Cards; Cartas_latched <='1'; --ya se leyo
+					when "00000001" => Cards <=1; CartaMaxima <= Cards; Cartas_latched <='1'; --ya se leyo
+					when others => Cards <=5; CartaMaxima <= Cards; Cartas_latched <='1'; --ya se leyo
+				end case;
+			end if;
+			
+			if Cartas_latched = '1' then ------indica que se dio click para leer
+				case Cards is---case castras
+					when 1 => ---una cartta
+						case Disp is
+							when 0 => SEG <= UnidadesG;
+							when 1 => SEG <= DecenasG;
+							when 2 => SEG <= CentenasG;
+							when 3 => SEG <= Players_vec;  -- Display para número de jugadores
+							when 6 => SEG <= Cero; --decesnas carttsa
+							when 7 => SEG <= Uno; --unidades cartas
+							when others => SEG <= "10001001";--dos vacios
+						end case;
+						-----=====SIGUEINTE ESTADO ========
+						 if EdoST = '1' and Cartas_latched = '1' then
+							  estado_main <= SUBIDA1;-----ahora mismo estoy probando con IDLE
+							  Cartas_latched <= '0'; ---Estrado sigueinte deseado
+						 end if;	
+						
+					when 2 => --dos cartas
+						case Disp is
+							when 0 => SEG <= UnidadesG;
+							when 1 => SEG <= DecenasG;
+							when 2 => SEG <= CentenasG;
+							when 3 => SEG <= Players_vec;  -- Display para número de jugadores
+							when 6 => SEG <= Cero; --decesnas carttsa
+							when 7 => SEG <= Dos; --unidades cartas
+							when others => SEG <= "10001001";--dos vacios
+						end case;
+						-----=====SIGUEINTE ESTADO ========
+						 if EdoST = '1' and Cartas_latched = '1' then
+							  estado_main <= SUBIDA1;-----ahora mismo estoy probando con IDLE
+							  Cartas_latched <= '0'; ---Estrado sigueinte deseado
+						 end if;	
+						
+					when 3 => --Tres cartas
+						case Disp is
+							when 0 => SEG <= UnidadesG;
+							when 1 => SEG <= DecenasG;
+							when 2 => SEG <= CentenasG;
+							when 3 => SEG <= Players_vec;  -- Display para número de jugadores
+							when 6 => SEG <= Cero; --decesnas carttsa
+							when 7 => SEG <= Tres; --unidades cartas
+							when others => SEG <= "10001001";--dos vacios
+						end case;
+						-----=====SIGUEINTE ESTADO ========
+						 if EdoST = '1' and Cartas_latched = '1' then
+							  estado_main <= SUBIDA1;-----ahora mismo estoy probando con IDLE
+							  Cartas_latched <= '0'; ---Estrado sigueinte deseado
+						 end if;	
+						
+					when 4 => --Cuatro cartas
+						case Disp is
+							when 0 => SEG <= UnidadesG;
+							when 1 => SEG <= DecenasG;
+							when 2 => SEG <= CentenasG;
+							when 3 => SEG <= Players_vec;  -- Display para número de jugadores
+							when 6 => SEG <= Cero; --decesnas carttsa
+							when 7 => SEG <= Cuatro; --unidades cartas
+							when others => SEG <= "10001001";--dos vacios
+						end case;
+						-----=====SIGUEINTE ESTADO ========
+						 if EdoST = '1' and Cartas_latched = '1' then
+							  estado_main <= SUBIDA1;-----ahora mismo estoy probando con IDLE
+							  Cartas_latched <= '0'; ---
+						 end if;	
+						 
+					when 5 => --Cinco cartas
+						case Disp is
+							when 0 => SEG <= UnidadesG;
+							when 1 => SEG <= DecenasG;
+							when 2 => SEG <= CentenasG;
+							when 3 => SEG <= Players_vec;  -- Display para número de jugadores
+							when 6 => SEG <= Cero; --decesnas carttsa
+							when 7 => SEG <= Cinco; --unidades cartas
+							when others => SEG <= "10001001";--dos vacios
+						end case;
+						-----=====SIGUEINTE ESTADO ========
+						 if EdoST = '1' and Cartas_latched = '1' then
+							  estado_main <= SUBIDA1;-----ahora mismo estoy probando con IDLE
+							  Cartas_latched <= '0'; ---Estrado sigueinte deseado
+						 end if;	
+						 
+					when 6 => --seis cartas
+						case Disp is
+							when 0 => SEG <= UnidadesG;
+							when 1 => SEG <= DecenasG;
+							when 2 => SEG <= CentenasG;
+							when 3 => SEG <= Players_vec;  -- Display para número de jugadores
+							when 6 => SEG <= Cero; --decesnas carttsa
+							when 7 => SEG <= Seis; --unidades cartas
+							when others => SEG <= "10001001";--dos vacios
+						end case;
+						-----=====SIGUEINTE ESTADO ========
+						 if EdoST = '1' and Cartas_latched = '1' then
+							  estado_main <= SUBIDA1;-----ahora mismo estoy probando con IDLE
+							  Cartas_latched <= '0'; ---Estrado sigueinte deseado
+						 end if;	
+						 
+					when 7 => --siete cartas
+						case Disp is
+							when 0 => SEG <= UnidadesG;
+							when 1 => SEG <= DecenasG;
+							when 2 => SEG <= CentenasG;
+							when 3 => SEG <= Players_vec;  -- Display para número de jugadores
+							when 6 => SEG <= Cero; --decesnas carttsa
+							when 7 => SEG <= Siete; --unidades cartas
+							when others => SEG <= "10001001";--dos vacios
+						end case;
+						-----=====SIGUEINTE ESTADO ========
+						 if EdoST = '1' and Cartas_latched = '1' then
+							  estado_main <= SUBIDA1;-----ahora mismo estoy probando con IDLE
+							  Cartas_latched <= '0'; ---Estrado sigueinte deseado
+						 end if;	
+						 
+					when 8 => --ocjho cartas
+						case Disp is
+							when 0 => SEG <= UnidadesG;
+							when 1 => SEG <= DecenasG;
+							when 2 => SEG <= CentenasG;
+							when 3 => SEG <= Players_vec;  -- Display para número de jugadores
+							when 6 => SEG <= Cero; --decesnas carttsa
+							when 7 => SEG <= Ocho; --unidades cartas
+							when others => SEG <= "10001001";--dos vacios
+						end case;
+						-----=====SIGUEINTE ESTADO ========
+						 if EdoST = '1' and Cartas_latched = '1' then
+							  estado_main <= SUBIDA1;-----ahora mismo estoy probando con IDLE
+							  Cartas_latched <= '0'; ---Estrado sigueinte deseado
+						 end if;	
+						 
+					when 9 => --nueve cartas
+						case Disp is
+							when 0 => SEG <= UnidadesG;
+							when 1 => SEG <= DecenasG;
+							when 2 => SEG <= CentenasG;
+							when 3 => SEG <= Players_vec;  -- Display para número de jugadores
+							when 6 => SEG <= Cero; --decesnas carttsa
+							when 7 => SEG <= Nueve; --unidades cartas
+							when others => SEG <= "10001001";--dos vacios
+						end case;
+						-----=====SIGUEINTE ESTADO ========
+						 if EdoST = '1' and Cartas_latched = '1' then
+							  estado_main <= SUBIDA1;-----ahora mismo estoy probando con IDLE
+							  Cartas_latched <= '0'; ---Estrado sigueinte deseado
+						 end if;	
+						 
+					when 10 => --diez cartas
+						case Disp is
+							when 0 => SEG <= UnidadesG;--0
+							when 1 => SEG <= DecenasG;--8
+							when 2 => SEG <= CentenasG;--1
+							when 3 => SEG <= Players_vec;  -- Display para número de jugadores
+							when 6 => SEG <= Uno; --decesnas carttsa
+							when 7 => SEG <= Cero; --unidades cartas
+							when others => SEG <= "10001001";--dos vacios
+						end case;
+						-----=====SIGUEINTE ESTADO ========
+						 if EdoST = '1' and Cartas_latched = '1' then
+							  estado_main <= SUBIDA1;-----ahora mismo estoy probando con IDLE
+							  Cartas_latched <= '0'; ---Estrado sigueinte deseado
+						 end if;	
+						 
+				end case;-----case de las cartas
+			end if;
+			
+	when CARTAS_NEXTION =>
+		case Dato_Rx is 
+					when "00100001" => Cards <=1; CartaMaxima <= Cards; estado_main <=SUBIDA1; --ya se leyo
+					when "00100010" => Cards <=2; CartaMaxima <= Cards; estado_main <=SUBIDA1; --ya se leyo
+					when "00100011" => Cards <=3; CartaMaxima <= Cards; estado_main <=SUBIDA1; --ya se leyo
+					when "00100100" => Cards <=4; CartaMaxima <= Cards; estado_main <=SUBIDA1; --ya se leyo
+					when "00100101" => Cards <=5; CartaMaxima <= Cards; estado_main <=SUBIDA1; --ya se leyo
+					when "00100110" => Cards <=6; CartaMaxima <= Cards; estado_main <=SUBIDA1; --ya se leyo
+					when "00100111" => Cards <=7; CartaMaxima <= Cards; estado_main <=SUBIDA1; --ya se leyo
+					when "00101000" => Cards <=8; CartaMaxima <= Cards; estado_main <=SUBIDA1; --ya se leyo
+					when "00101001" => Cards <=9; CartaMaxima <= Cards; estado_main <=SUBIDA1; --ya se leyo
+					when "00110000" => Cards <=10; CartaMaxima <= Cards; estado_main <=SUBIDA1; --ya se leyo
+					when others => estado_main <= CARTAS_NEXTION;
+				end case;
+	
+	when SUBIDA1 =>
+			DIR <= '1'; ---Direccion horarioa
+			
+			if contador_clk = DIVISOR then ----Contador igual a 250 000
+				contador_clk <= 0;---reseteamos contador del clk interno 
+				step_int <= '1'; -- Damos un paso al hacer un FLANCO ASCENDENTE
+				estado_main <= BAJADA1;
+			else
+				contador_clk <= contador_clk + 1; ----Seguir contando
+			end if;
+				
+				
+			when BAJADA1 =>
+            if contador_clk = DIVISOR then --------contador igual a 250 000
+               contador_clk <= 0; -------resetear contador del clk interno
+               step_int <= '0'; -----FLANCO DE BAJADA 
+               contador_pasos <= contador_pasos + 1; ----vamos sumando el total de pasos
+					PasosHorario <= PasosHorario + 1; ---NECESARIO PARA EL REGERESO
+					
+					if contador_pasos = PasosMesa then ---llegar a la meta
+					--primera meta
+						contador_pasos <= 0;
+						estado_main <= MOTORREDUCTOR_ON;--Hacre la accion del motorreductor
+               else
+                  estado_main <= SUBIDA1;--seguir avanzando
+               end if;
+             else
+               contador_clk <= contador_clk + 1;
+             end if;
+				 
+			when SUBIDA2 =>
+				DIR <='0'; ----ANTOHIORARIO
+				if contador_clk = DIVISOR then ----Contador igual a 250 000
+               contador_clk <= 0;---reseteamos contador del clk interno 
+               step_int <= '1'; -- Damos un paso al hacer un FLANCO ASCENDENTE
+               estado_main <= BAJADA2;
+				else
+               contador_clk <= contador_clk + 1; ----Seguir contando
+				end if;
+
+				
+			when BAJADA2 =>
+				if contador_clk = DIVISOR then --------contador igual a 250 000
+					contador_clk <= 0; -------resetear contador del clk interno
+					step_int <= '0'; -----FLANCO DE BAJADA 
+					contador_pasos <= contador_pasos + 1; ----vamos sumando el total de pasos
+					
+					if contador_pasos = PasosHorario then ---cuando el conteo de pasos llegue a 199 terminamos
+						contador_pasos <= 0;
+						PasosHorario <= 0;
+						
+						---estado_main <= IDLE_MAIN;
+						if AuxCartas = Cards then 
+							AuxCartas <= 0;
+							estado_main <= IDLE_MAIN;
+						else 
+							estado_main <= SUBIDA1;---volvemos a mover a todos los jugadores
+						end if;
+						
+					else
+						 estado_main <= SUBIDA2;
+					end if;
+				else
+					contador_clk <= contador_clk + 1;
+				end if;
+
+		when MOTORREDUCTOR_ON =>
+			AuxPlayers <= AuxPlayers +1 ;
+			step_int <= '0'; -- motor detenido-=========
+			MOTOR <= '1';
+                
+			 if contador < TimeEncendido then
+				  contador <= contador + 1;
+			 else
+				  contador <= 0;
+				  estado_main <= MOTORREDUCTOR_OFF;  -- Cambia al estado APAGADO
+			 end if;
+			
+		when MOTORREDUCTOR_OFF =>
+			 MOTOR <= '0';
+			 --------======Timer de espera de dos segundos util para el futuro-======
+			 if Contador < Timer2 then
+				  Contador <= Contador + 1;
+			 else
+				  Contador <= 0;
+				  contador_pasos <= 0;
+				  --estado_main <= HOLD_MAIN; -- o IDLE si deseas
+				  estado_main <= HOLD_MAIN;
+			 end if;
+          --estado_main <= HOLD_MAIN;
+
+				
+		when HOLD_MAIN =>
+--		-------ULTIMO JUGADOR ----
+			if AuxPlayers = Players then 
+				AuxCartas <= AuxCartas + 1;---aumentar el numeor de cartas
+				AuxPlayers <= 0;
+				estado_main <= SUBIDA2;--PARA REGREDASR
+			else 
+				estado_main <= SUBIDA1;
+			end if;
+				
+	end case;-----FIN FSM MAIN
+	
+	end if;-----IF principla del rising edge del CLK
+	
+---=====================TODOD A PARTIR DE AQUI FUERA DEL RISING EDGE CLK
+
+END PROCESS;-------=====PROCESS PRINCIAPL
+
+end Behavioral;-----END PROGRAMA
