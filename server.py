@@ -6,6 +6,7 @@ class Cliente:
     conn = None
     addr = None
 
+
 def clientthread(conn, addr):
     conn.send(bytes("Bienvenido\nEste bot de ayuda puede auxiliarlo con:\n" #Volver a este es con 0
                     "1.-Manual de usuario\n"
